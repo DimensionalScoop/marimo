@@ -178,13 +178,19 @@ export const basicBundle = (opts: CodeMirrorSetupOpts): Extension[] => {
     cellId,
     lspConfig,
     diagnosticsConfig,
+    keymapConfig,
   } = opts;
   const placeholderType = getPlaceholderType(opts);
 
   return [
     ///// View
     EditorView.lineWrapping,
-    drawSelection(),
+    // helix() registers drawSelection({ cursorBlinkRate: 0, drawRangeCursor: false })
+    // for its block cursor.  The selectionConfig facet combines configs with
+    // `drawRangeCursor: (a, b) => a || b`, so adding a second drawSelection()
+    // with the default `drawRangeCursor: true` would re-enable range cursors and
+    // overlap helix's own block-cursor decorations.  Skip it when helix is active.
+    keymapConfig.preset !== "helix" ? drawSelection() : [],
     dropCursor(),
     highlightActiveLine(),
     highlightActiveLineGutter(),

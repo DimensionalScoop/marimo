@@ -21,6 +21,7 @@
     "./unstable_internal/*": "./src/*"
   },
   "dependencies": {
+    "codemirror-helix": "workspace:*",
     "@ai-sdk/react": "^2.0.125",
     "@anywidget/types": "^0.2.0",
     "@codemirror/autocomplete": "^6.20.0",

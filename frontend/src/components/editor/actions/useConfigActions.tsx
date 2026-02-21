@@ -94,6 +94,18 @@ export function useConfigActions() {
       },
     },
     {
+      label: "Config > Switch keymap to Helix",
+      hidden: config.keymap.preset === "helix",
+      handle: () => {
+        handleUserConfig({
+          keymap: {
+            ...config.keymap,
+            preset: "helix",
+          },
+        });
+      },
+    },
+    {
       label: "Config > Disable GitHub Copilot",
       handle: () => {
         handleUserConfig({

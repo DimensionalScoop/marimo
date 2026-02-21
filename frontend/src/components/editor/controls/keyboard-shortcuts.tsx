@@ -274,7 +274,7 @@ export const KeyboardShortcuts: React.FC = () => {
       group,
       <p className="text-xs text-muted-foreground flex items-center gap-1">
         Press{" "}
-        {config.keymap.preset === "vim" ? (
+        {config.keymap.preset === "vim" || config.keymap.preset === "helix" ? (
           <>
             <KeyboardHotkeys shortcut={isPlatformMac() ? "Cmd" : "Ctrl"} />
             <Kbd>Esc</Kbd>

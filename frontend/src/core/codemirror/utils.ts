@@ -53,6 +53,9 @@ export function isInVimNormalMode(ev: EditorView): boolean {
   return vimState.mode === "normal";
 }
 
+// Re-exported from helix.ts to keep all mode-check utilities co-located here.
+export { isInHelixNormalMode, isInHelixInsertMode } from "./keymaps/helix";
+
 export function selectAllText(ev: EditorView | undefined) {
   if (!ev) {
     return;

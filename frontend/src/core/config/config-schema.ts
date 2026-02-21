@@ -110,7 +110,7 @@ export const UserConfigSchema = z
       .prefault({}),
     keymap: z
       .looseObject({
-        preset: z.enum(["default", "vim"]).prefault("default"),
+        preset: z.enum(["default", "vim", "helix"]).prefault("default"),
         overrides: z.record(z.string(), z.string()).prefault({}),
         destructive_delete: z.boolean().prefault(true),
       })

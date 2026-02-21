@@ -14,14 +14,16 @@ import {
   keymap,
 } from "@codemirror/view";
 import { getCM, vim } from "@replit/codemirror-vim";
+import { helix } from "codemirror-helix";
 import type { KeymapConfig } from "@/core/config/config-schema";
 import type { HotkeyProvider } from "@/core/hotkeys/hotkeys";
 import { logNever } from "@/utils/assertNever";
 import { once } from "@/utils/once";
 import { cellActionsState } from "../cells/state";
 import { vimKeymapExtension } from "./vim";
+import { helixKeymapExtension } from "./helix";
 
-export const KEYMAP_PRESETS = ["default", "vim"] as const;
+export const KEYMAP_PRESETS = ["default", "vim", "helix"] as const;
 
 export function keymapBundle(
   config: KeymapConfig,
@@ -66,6 +68,21 @@ export function keymapBundle(
         vim({ status: false }),
         // Custom vim keymaps for cell navigation
         Prec.high(vimKeymapExtension()),
+      ];
+    case "helix":
+      return [
+        keymap.of(overrideKeymap(hotkeys)),
+        // Base helix mode. helix() registers its own drawSelection with
+        // cursorBlinkRate:0 and drawRangeCursor:false for its block cursor.
+        // basicBundle also registers drawSelection() with defaults; the facet
+        // combiner merges them (min blinkRate, OR drawRangeCursor). The OR
+        // would re-enable range cursor drawing, overlapping helix's own block
+        // cursor decorations. We override after the fact by re-registering
+        // with the helix values at default priority so the combiner result
+        // stays correct.
+        helix(),
+        // Custom helix keymaps for cell navigation and marimo commands
+        Prec.high(helixKeymapExtension()),
       ];
     default:
       logNever(config.preset);
