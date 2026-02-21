@@ -1,6 +1,6 @@
 /* Copyright 2026 Marimo. All rights reserved. */
 
-import { StateEffect, StateField, type Extension } from "@codemirror/state";
+import { Prec, StateEffect, StateField, type Extension } from "@codemirror/state";
 import { EditorView, ViewPlugin, type ViewUpdate, keymap } from "@codemirror/view";
 import {
   commands,
@@ -43,6 +43,30 @@ const HelixMinor = {
   Match: 5,
   Space: 6,
 } as const;
+
+// ---------------------------------------------------------------------------
+// Pre-keydown mode snapshot
+// ---------------------------------------------------------------------------
+
+/**
+ * The helix mode at the moment of the most recent keydown event, captured
+ * before helix's keymap runs and synchronously updates the state.
+ *
+ * Problem: React Aria's `onKeyDown` on the cell container fires after CM's
+ * native keydown handler on contentDOM. By then, helix has already dispatched
+ * `MODE_EFF.NORMAL` (e.g. for Escape from insert mode), so reading
+ * `helixModeField` post-hoc always shows Normal mode.
+ *
+ * We capture the mode in a `Prec.highest` `domEventHandlers.keydown` that
+ * fires before any keymap binding, then navigation.ts reads it synchronously
+ * in the same event loop tick.
+ */
+let modeAtKeydown: HelixModeState | null = null;
+
+/** Read the helix mode as it was when the last keydown event fired. */
+export function getHelixModeAtKeydown(): HelixModeState | null {
+  return modeAtKeydown;
+}
 
 // ---------------------------------------------------------------------------
 // Mode StateField
@@ -211,6 +235,18 @@ export function helixKeymapExtension(): Extension[] {
         },
       },
     ]),
+
+    // Capture the current mode before any keymap binding runs so that
+    // navigation.ts can read it after helix has already updated the state.
+    // Must be Prec.highest so it fires before helix's own keydown handler.
+    Prec.highest(
+      EditorView.domEventHandlers({
+        keydown(_event, view) {
+          modeAtKeydown = view.state.field(helixModeField, false) ?? null;
+          return false; // observe only — do not consume the event
+        },
+      }),
+    ),
 
     // Re-dispatch Ctrl+Escape so React components above the editor receive it.
     // Helix swallows this event the same way vim does.
