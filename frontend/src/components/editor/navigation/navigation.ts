@@ -690,7 +690,11 @@ export function useCellEditorNavigationProps(
     const view = editorView.current;
     const state = view.state;
 
-    const wasSimplified = simplifySelection(view);
+    // Helix always holds a non-empty range as its normal-mode cursor.
+    // simplifySelection would collapse it to a point and return true,
+    // causing handleEscape to return before exitToCommandMode fires.
+    // Helix manages cursor shape itself, so skip this step for helix mode.
+    const wasSimplified = keymapPreset !== "helix" && simplifySelection(view);
     if (wasSimplified) {
       return;
     }
