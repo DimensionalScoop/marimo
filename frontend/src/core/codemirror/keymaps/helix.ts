@@ -168,17 +168,29 @@ export function helixKeymapExtension(): Extension[] {
     // gd — go to definition, with helix minor-mode cleanup
     goToDefinitionKeymap(),
 
-    // Register sync — fires only when registers actually change
+    // Global mode + register sync across all open cell editors
     ViewPlugin.fromClass(
       class {
         constructor(private view: EditorView) {
+          // Defer registration so the view is fully mounted before we touch it.
+          // On registration, the current global mode is pushed to this new cell
+          // so it doesn't start in normal mode while every other cell is in insert.
           requestAnimationFrame(() =>
             HelixStateSync.INSTANCES.addInstance(view),
           );
         }
         update(update: ViewUpdate) {
-          if (HelixStateSync.INSTANCES.hasYankEffect(update)) {
-            HelixStateSync.INSTANCES.syncFrom(this.view);
+          const sync = HelixStateSync.INSTANCES;
+          for (const tr of update.transactions) {
+            for (const effect of tr.effects) {
+              if (effect.is(modeEffectType)) {
+                sync.syncModeFrom(this.view, effect.value);
+                break;
+              }
+            }
+          }
+          if (sync.hasYankEffect(update)) {
+            sync.syncFrom(this.view);
           }
         }
         destroy() {
@@ -288,18 +300,17 @@ function goToDefinitionKeymap(): Extension {
 // ---------------------------------------------------------------------------
 
 /**
- * Synchronises helix global state (registers, theme) across all cell editors.
+ * Synchronises helix global state (mode, registers, theme) across all cell editors.
  *
- * Uses `globalStateSync()` from codemirror-helix, which generates the minimal
- * set of transactions needed to bring another editor's global state in line.
+ * Mode is global: pressing `i` in any cell puts every cell into insert mode.
+ * This matches the real helix model where mode is a property of the session,
+ * not of individual buffers.
  *
- * Syncing is gated on the presence of a `yankEffect` in the update's
- * transactions — registers only change when the user yanks, deletes, or runs
- * a search. This avoids the O(N) overhead of dispatching to every cell on
- * every single keystroke during insert mode.
+ * Register sync is gated on `yankEffect` presence — registers only change on
+ * explicit yank/delete/search, not on every keystroke.
  *
- * The `yankEffectType` is lazily extracted from the first `globalStateSync`
- * call to avoid a chicken-and-egg problem at module load time.
+ * `yankEffectType` is lazily extracted from the first `globalStateSync` call
+ * to avoid a chicken-and-egg dependency at module load time.
  */
 class HelixStateSync {
   private instances = new Set<EditorView>();
@@ -311,11 +322,35 @@ class HelixStateSync {
   private constructor() {}
 
   addInstance(view: EditorView) {
+    // Push the current global mode to the new cell before registering it so
+    // it doesn't briefly flash "normal" while every other cell is in insert.
+    const donor = this.instances.values().next().value as EditorView | undefined;
+    if (donor) {
+      const currentMode = donor.state.field(helixModeField, false);
+      if (currentMode) {
+        view.dispatch({ effects: modeEffectType.of(currentMode) });
+      }
+    }
     this.instances.add(view);
   }
 
   removeInstance(view: EditorView) {
     this.instances.delete(view);
+  }
+
+  /**
+   * Broadcast a mode transition from `origin` to all other cells.
+   * Called on every `modeEffect` detected in any cell's update cycle.
+   */
+  syncModeFrom(origin: EditorView, modeValue: { type: number; minor: number }) {
+    if (this.isBroadcasting) return;
+    this.isBroadcasting = true;
+    for (const view of this.instances) {
+      if (view !== origin) {
+        view.dispatch({ effects: modeEffectType.of(modeValue) });
+      }
+    }
+    this.isBroadcasting = false;
   }
 
   /**

@@ -487,3 +487,88 @@ describe("KEYMAP_PRESETS and keymapBundle", () => {
     ).not.toThrow();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Global mode sync
+// ---------------------------------------------------------------------------
+
+describe("global mode sync across cells", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => {
+    vi.useRealTimers();
+    document.body.innerHTML = "";
+  });
+
+  it("pressing i in one cell puts all other cells into insert mode", () => {
+    const view1 = createHelixEditor("a = 1", makeCellActions());
+    const view2 = createHelixEditor("b = 2", makeCellActions());
+    const view3 = createHelixEditor("c = 3", makeCellActions());
+    flushHelixInit();
+
+    expect(isInHelixNormalMode(view1)).toBe(true);
+    expect(isInHelixNormalMode(view2)).toBe(true);
+    expect(isInHelixNormalMode(view3)).toBe(true);
+
+    pressKey(view1, "i"); // switch cell 1 to insert
+
+    expect(isInHelixInsertMode(view1)).toBe(true);
+    expect(isInHelixInsertMode(view2)).toBe(true); // synced
+    expect(isInHelixInsertMode(view3)).toBe(true); // synced
+
+    view1.destroy();
+    view2.destroy();
+    view3.destroy();
+  });
+
+  it("pressing Escape in one cell returns all cells to normal mode", () => {
+    const view1 = createHelixEditor("a = 1", makeCellActions());
+    const view2 = createHelixEditor("b = 2", makeCellActions());
+    flushHelixInit();
+
+    pressKey(view1, "i");
+    expect(isInHelixInsertMode(view2)).toBe(true);
+
+    pressKey(view1, "Escape");
+    expect(isInHelixNormalMode(view1)).toBe(true);
+    expect(isInHelixNormalMode(view2)).toBe(true);
+
+    view1.destroy();
+    view2.destroy();
+  });
+
+  it("a newly added cell inherits the current global mode", () => {
+    const view1 = createHelixEditor("a = 1", makeCellActions());
+    flushHelixInit();
+    pressKey(view1, "i"); // global mode is now insert
+    expect(isInHelixInsertMode(view1)).toBe(true);
+
+    // New cell mounts while mode is insert
+    const view2 = createHelixEditor("b = 2", makeCellActions());
+    flushHelixInit(); // triggers addInstance → pushes current mode to view2
+
+    expect(isInHelixInsertMode(view2)).toBe(true);
+
+    view1.destroy();
+    view2.destroy();
+  });
+
+  it("mode sync does not create broadcast loops", () => {
+    const view1 = createHelixEditor("a = 1", makeCellActions());
+    const view2 = createHelixEditor("b = 2", makeCellActions());
+    flushHelixInit();
+
+    // Trigger several rapid mode changes — if loops occurred we'd get a stack overflow
+    expect(() => {
+      pressKey(view1, "i");
+      pressKey(view1, "Escape");
+      pressKey(view2, "i");
+      pressKey(view2, "Escape");
+    }).not.toThrow();
+
+    expect(isInHelixNormalMode(view1)).toBe(true);
+    expect(isInHelixNormalMode(view2)).toBe(true);
+
+    view1.destroy();
+    view2.destroy();
+  });
+});
