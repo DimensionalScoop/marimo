@@ -2295,7 +2295,7 @@ components:
       type: object
     KeymapConfig:
       description: "Configuration for keymaps.\n\n    **Keys.**\n\n    - `preset`:\
-        \ one of `\"default\"` or `\"vim\"`\n    - `overrides`: a dict of keymap actions\
+        \ one of `\"default\"`, `\"vim\"`, or `\"helix\"`\n    - `overrides`: a dict of keymap actions\
         \ to their keymap override\n    - `vimrc`: path to a vimrc file to load keymaps\
         \ from\n    - `destructive_delete`: if `True`, allows deleting cells with\
         \ content."
@@ -2310,6 +2310,7 @@ components:
           enum:
           - default
           - vim
+          - helix
         vimrc:
           anyOf:
           - type: string
@@ -6313,4 +6314,3 @@ paths:
       summary: Submit login form
       tags:
       - auth
-
