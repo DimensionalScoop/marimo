@@ -3,7 +3,6 @@
 import { closeCompletion, completionStatus } from "@codemirror/autocomplete";
 import { simplifySelection } from "@codemirror/commands";
 import type { EditorView } from "@codemirror/view";
-import { getHelixModeAtKeydown } from "@/core/codemirror/utils";
 import {
   setSignatureHelpTooltip,
   signatureHelpTooltipField,
@@ -718,32 +717,11 @@ export function useCellEditorNavigationProps(
 
   const { keyboardProps } = useKeyboard({
     onKeyDown: (evt) => {
-      if (keymapPreset === "vim") {
-        // For vim mode, use configurable shortcut
+      if (keymapPreset === "vim" || keymapPreset === "helix") {
+        // Both vim and helix use Ctrl+Escape to exit to command mode.
+        // Plain Escape is owned by the modal editor (mode transitions).
         if (vimCommandModeShortcut(evt)) {
           handleEscape();
-        }
-      } else if (keymapPreset === "helix") {
-        // Escape exits to command mode only when helix was already in clean
-        // normal mode.  In insert or select mode, Escape belongs to helix
-        // (returning to normal mode) and must not deselect the cell.
-        //
-        // We read the mode from the pre-keydown snapshot rather than the
-        // current state because, by the time React Aria fires this handler,
-        // helix has already processed the event synchronously and updated
-        // helixModeField to Normal — making post-hoc mode checks unreliable.
-        if (evt.key === "Escape") {
-          const m = getHelixModeAtKeydown();
-          const wasInCleanNormalMode = !m || (m.type === 0 && m.minor === 2);
-          if (wasInCleanNormalMode) {
-            handleEscape();
-          }
-        }
-        // Don't propagate keys that helix already handled — prevents them from
-        // reaching the browser (e.g. / opening Firefox Quick Find).
-        const nativeEvt = (evt as unknown as { nativeEvent?: Event }).nativeEvent ?? evt;
-        if ((nativeEvt as Event).defaultPrevented) {
-          return;
         }
       } else {
         // For non-vim mode, regular Escape exits to command mode

@@ -1,98 +1,30 @@
 /* Copyright 2026 Marimo. All rights reserved. */
 
-import { Prec, StateEffect, StateField, type Extension } from "@codemirror/state";
-import { EditorView, ViewPlugin, type ViewUpdate, keymap } from "@codemirror/view";
-import {
-  commands,
-  globalStateSync,
-  resetMode,
-} from "codemirror-helix";
-import { goToDefinitionAtCursorPosition } from "../go-to-definition/utils";
+import { StateEffect, StateField, type Extension } from "@codemirror/state";
+import { EditorView, ViewPlugin, keymap } from "@codemirror/view";
+import { commands, resetMode } from "codemirror-helix";
 import { cellActionsState, cellIdState } from "../cells/state";
+import { goToDefinitionAtCursorPosition } from "../go-to-definition/utils";
+import { onIdle } from "@/utils/idle";
+import { Logger } from "@/utils/Logger";
 
 // ---------------------------------------------------------------------------
-// Mode types — values come from codemirror-helix internals.
-// These are stable across the library's versions (the enum is fundamental to
-// the model), but they are not exported.  We derive them from the exported
-// `resetMode` instance rather than hard-coding magic numbers so that a future
-// rename would surface as a type error rather than a silent regression.
+// Mode field — tracks helix mode so we can guard j/k and sync across cells.
+// We extract the StateEffectType from the exported `resetMode` effect instance
+// rather than importing it directly (it's not exported by codemirror-helix).
 // ---------------------------------------------------------------------------
 
-/**
- * The `StateEffectType` used by codemirror-helix for all mode transitions.
- *
- * `resetMode` is `MODE_EFF.NORMAL` — a `StateEffect` *instance*, not a type.
- * Every CM6 `StateEffect` instance exposes its `.type` property, which *is*
- * the `StateEffectType` we can pass to `effect.is()`.
- */
-const modeEffectType = resetMode.type as ReturnType<
-  typeof StateEffect.define<{ type: number; minor: number }>
->;
+const modeEffectType = (resetMode as unknown as { type: ReturnType<typeof StateEffect.define> }).type;
 
-/** Helix mode type constants, mirroring the library's internal enum. */
-const HelixMode = {
-  Normal: 0,
-  Insert: 1,
-  Select: 4,
-} as const;
+export type HelixModeState = { type: number; minor: number };
 
-/** Helix minor-mode constants (sub-modes within Normal/Select). */
-const HelixMinor = {
-  Normal: 2,
-  Goto: 3,
-  Match: 5,
-  Space: 6,
-} as const;
-
-// ---------------------------------------------------------------------------
-// Pre-keydown mode snapshot
-// ---------------------------------------------------------------------------
-
-/**
- * The helix mode at the moment of the most recent keydown event, captured
- * before helix's keymap runs and synchronously updates the state.
- *
- * Problem: React Aria's `onKeyDown` on the cell container fires after CM's
- * native keydown handler on contentDOM. By then, helix has already dispatched
- * `MODE_EFF.NORMAL` (e.g. for Escape from insert mode), so reading
- * `helixModeField` post-hoc always shows Normal mode.
- *
- * We capture the mode in a `Prec.highest` `domEventHandlers.keydown` that
- * fires before any keymap binding, then navigation.ts reads it synchronously
- * in the same event loop tick.
- */
-let modeAtKeydown: HelixModeState | null = null;
-
-/** Read the helix mode as it was when the last keydown event fired. */
-export function getHelixModeAtKeydown(): HelixModeState | null {
-  return modeAtKeydown;
-}
-
-// ---------------------------------------------------------------------------
-// Mode StateField
-// ---------------------------------------------------------------------------
-
-interface HelixModeState {
-  /** Major mode: 0=Normal, 1=Insert, 4=Select */
-  type: number;
-  /** Minor mode (only meaningful when type === Normal): 2=Normal, 3=Goto, … */
-  minor: number;
-}
-
-/**
- * A `StateField` that tracks the current helix mode by observing every
- * `modeEffect` dispatched through the editor state.
- *
- * This is the only reliable way to tell Normal from Select mode: both have
- * non-empty selections, so selection shape alone is insufficient.
- */
-export const helixModeField = StateField.define<HelixModeState>({
-  create: () => ({ type: HelixMode.Normal, minor: HelixMinor.Normal }),
+// mode.type: 0=Normal, 1=Insert, 4=Select
+const helixModeField = StateField.define<HelixModeState>({
+  create: () => ({ type: 0, minor: 2 }),
   update(mode, tr) {
     for (const effect of tr.effects) {
       if (effect.is(modeEffectType)) {
-        const { type, minor = HelixMinor.Normal } = effect.value;
-        return { type, minor };
+        return effect.value as HelixModeState;
       }
     }
     return mode;
@@ -100,156 +32,89 @@ export const helixModeField = StateField.define<HelixModeState>({
 });
 
 export function isInHelixNormalMode(view: EditorView): boolean {
-  const m = view.state.field(helixModeField, false);
-  // Treat missing field (e.g. in tests without helix()) as normal mode.
-  if (!m) return true;
-  return m.type === HelixMode.Normal && m.minor === HelixMinor.Normal;
+  return (view.state.field(helixModeField, false)?.type ?? 0) === 0;
 }
 
 export function isInHelixInsertMode(view: EditorView): boolean {
-  const m = view.state.field(helixModeField, false);
-  if (!m) return false;
-  return m.type === HelixMode.Insert;
+  return (view.state.field(helixModeField, false)?.type ?? 0) === 1;
 }
 
 // ---------------------------------------------------------------------------
-// Boundary checks
+// Boundary helpers
+// In helix normal mode, the cursor is always a non-empty range {from:N, to:N+1}.
+// isAtStartOfEditor (from===0 && to===0) would never match, so we need our own.
 // ---------------------------------------------------------------------------
 
-/**
- * End-of-document check for helix normal mode.
- *
- * Helix's normal-mode cursor is always a range.  At end-of-document
- * that range is `{from: docLength-1, to: docLength}`.
- */
-function isAtEndOfEditorHelix(view: EditorView): boolean {
-  const { main } = view.state.selection;
-  const docLength = view.state.doc.length;
-  if (docLength === 0) return true;
-  return main.from === docLength - 1 && main.to === docLength;
-}
-
-/**
- * Start-of-document check for helix normal mode.
- *
- * We require both `from === 0` *and* that we are actually in normal mode
- * (not select mode, which can also have anchor at 0 for mid-document selections).
- */
 function isAtStartOfEditorHelix(view: EditorView): boolean {
-  if (!isInHelixNormalMode(view)) return false;
-  return view.state.selection.main.from === 0;
+  const main = view.state.selection.main;
+  return main.from === 0 && isInHelixNormalMode(view);
+}
+
+function isAtEndOfEditorHelix(view: EditorView): boolean {
+  const main = view.state.selection.main;
+  const docLength = view.state.doc.length;
+  // In helix normal mode the cursor at end is {from: docLength-1, to: docLength}
+  return main.to >= docLength && isInHelixNormalMode(view);
 }
 
 // ---------------------------------------------------------------------------
 // Main extension
 // ---------------------------------------------------------------------------
 
-/**
- * Helix extension for marimo, parallel to {@link vimKeymapExtension}.
- *
- * Wires up:
- * - Mode tracking via `helixModeField`
- * - Cell navigation: j/k at document boundaries in normal mode only
- * - Go-to-definition: `gd` sequence in normal mode, resets helix minor mode after
- * - Save command: `:w` / `:write` via the helix command palette
- * - Register sync across cell editors, gated on actual yank/delete operations
- * - Ctrl+Escape re-dispatch for React command-mode listeners
- */
 export function helixKeymapExtension(): Extension[] {
   return [
     helixModeField,
 
-    // Cell boundary navigation — strictly normal mode only
-    keymap.of([
-      {
-        key: "j",
-        run: (view) => {
-          if (isAtEndOfEditorHelix(view) && isInHelixNormalMode(view)) {
-            const actions = view.state.facet(cellActionsState);
-            const cellId = view.state.facet(cellIdState);
-            actions.moveToNextCell({ cellId, before: false, noCreate: true });
-            return true;
-          }
-          return false;
-        },
+    // Cell boundary navigation — normal mode only
+    keymap.of([{
+      key: "j",
+      run: (view) => {
+        if (!isAtEndOfEditorHelix(view)) return false;
+        const actions = view.state.facet(cellActionsState);
+        const cellId = view.state.facet(cellIdState);
+        actions.moveToNextCell({ cellId, before: false, noCreate: true });
+        return true;
       },
-    ]),
-    keymap.of([
-      {
-        key: "k",
-        run: (view) => {
-          if (isAtStartOfEditorHelix(view)) {
-            const actions = view.state.facet(cellActionsState);
-            const cellId = view.state.facet(cellIdState);
-            actions.moveToNextCell({ cellId, before: true, noCreate: true });
-            return true;
-          }
-          return false;
-        },
+    }]),
+    keymap.of([{
+      key: "k",
+      run: (view) => {
+        if (!isAtStartOfEditorHelix(view)) return false;
+        const actions = view.state.facet(cellActionsState);
+        const cellId = view.state.facet(cellIdState);
+        actions.moveToNextCell({ cellId, before: true, noCreate: true });
+        return true;
       },
-    ]),
+    }]),
 
-    // gd — go to definition, with helix minor-mode cleanup
+    // Ctrl-[ exits insert mode on Linux/Windows (CodeMirror's default is dedent)
+    // Helix doesn't bind this natively, same situation as vim.
+    keymap.of([{
+      linux: "Ctrl-[",
+      win: "Ctrl-[",
+      run(view) {
+        if (!isInHelixInsertMode(view)) return false;
+        view.dispatch({ effects: modeEffectType.of({ type: 0, minor: 2 }) });
+        return true;
+      },
+    }]),
+
+    // gd — go to definition
     goToDefinitionKeymap(),
 
-    // Global mode + register sync across all open cell editors
-    ViewPlugin.fromClass(
-      class {
-        constructor(private view: EditorView) {
-          // Defer registration so the view is fully mounted before we touch it.
-          // On registration, the current global mode is pushed to this new cell
-          // so it doesn't start in normal mode while every other cell is in insert.
-          requestAnimationFrame(() =>
-            HelixStateSync.INSTANCES.addInstance(view),
-          );
-        }
-        update(update: ViewUpdate) {
-          const sync = HelixStateSync.INSTANCES;
-          for (const tr of update.transactions) {
-            for (const effect of tr.effects) {
-              if (effect.is(modeEffectType)) {
-                sync.syncModeFrom(this.view, effect.value);
-                break;
-              }
-            }
-          }
-          if (sync.hasYankEffect(update)) {
-            sync.syncFrom(this.view);
-          }
-        }
-        destroy() {
-          HelixStateSync.INSTANCES.removeInstance(this.view);
-        }
+    // :w / :write — save notebook
+    commands.of([{
+      name: "write",
+      aliases: ["w"],
+      help: "Save notebook",
+      handler(view) {
+        const actions = view.state.facet(cellActionsState);
+        actions.saveNotebook();
       },
-    ),
+    }]),
 
-    // Typable commands: :w / :write
-    commands.of([
-      {
-        name: "write",
-        aliases: ["w"],
-        help: "Save notebook",
-        handler(view) {
-          const actions = view.state.facet(cellActionsState);
-          actions.saveNotebook();
-        },
-      },
-    ]),
-
-    // Capture the current mode before any keymap binding runs so that
-    // navigation.ts can read it after helix has already updated the state.
-    // Must be Prec.highest so it fires before helix's own keydown handler.
-    Prec.highest(
-      EditorView.domEventHandlers({
-        keydown(_event, view) {
-          modeAtKeydown = view.state.field(helixModeField, false) ?? null;
-          return false; // observe only — do not consume the event
-        },
-      }),
-    ),
-
-    // Re-dispatch Ctrl+Escape so React components above the editor receive it.
-    // Helix swallows this event the same way vim does.
+    // Re-dispatch Ctrl+Escape so React Aria's useKeyboard on the cell container
+    // receives it. Helix swallows the event the same way vim does.
     EditorView.domEventHandlers({
       keydown(event, view) {
         if (event.ctrlKey && event.key === "Escape") {
@@ -259,28 +124,41 @@ export function helixKeymapExtension(): Extension[] {
         return false;
       },
     }),
+
+    // Mode sync across all open cell editors (mirrors CodeMirrorVimSync in vim.ts)
+    ViewPlugin.define((view) => {
+      requestAnimationFrame(() => {
+        HelixModeSync.INSTANCES.addInstance(view);
+      });
+      return {
+        update(update) {
+          const prev = update.startState.field(helixModeField, false);
+          const next = update.state.field(helixModeField, false);
+          if (next && prev && (prev.type !== next.type || prev.minor !== next.minor)) {
+            if (HelixModeSync.INSTANCES.isBroadcasting) return;
+            HelixModeSync.INSTANCES.isBroadcasting = true;
+            // Defer to keep the active editor snappy, same as CodeMirrorVimSync
+            onIdle(() => {
+              HelixModeSync.INSTANCES.broadcastModeChange(view, next);
+              HelixModeSync.INSTANCES.isBroadcasting = false;
+            });
+          }
+        },
+        destroy() {
+          HelixModeSync.INSTANCES.removeInstance(view);
+        },
+      };
+    }),
   ];
 }
 
 // ---------------------------------------------------------------------------
 // gd keymap
+// After g, helix enters Goto minor mode. We intercept d before helix sees it,
+// run go-to-definition, then manually reset helix back to Normal (helix only
+// resets minor mode via its own goto.* handlers — goto.d doesn't exist).
 // ---------------------------------------------------------------------------
 
-/**
- * Two-key sequence keymap for `gd` (go to definition).
- *
- * Design constraints:
- * - Must use explicit `key:` bindings (not `any`): helix's own `key: "d"`
- *   handler would be checked first at default priority and return true,
- *   preventing `any` from ever seeing `d`. With `Prec.high` wrapping the
- *   whole `helixKeymapExtension`, our bindings run before helix's.
- * - After we handle `d`, helix's goto minor mode is *not* reset (helix only
- *   resets it inside its own goto.* handlers, which we've bypassed). We
- *   manually dispatch a `modeEffectType` reset to keep helix's internal state
- *   consistent.
- * - The `awaitingGotoKey` flag is local to each extension instance so that a
- *   `g` press in cell A cannot trigger `gd` in cell B.
- */
 function goToDefinitionKeymap(): Extension {
   let awaitingGotoKey = false;
 
@@ -289,42 +167,26 @@ function goToDefinitionKeymap(): Extension {
       key: "g",
       run(view) {
         if (isInHelixNormalMode(view)) awaitingGotoKey = true;
-        return false; // let helix handle g (enters goto-minor-mode)
+        return false; // let helix handle g (enters goto minor mode)
       },
     },
     {
       key: "d",
       run(view) {
-        // After pressing g, helix transitions to Goto minor mode (minor=3).
-        // isInHelixNormalMode requires minor=Normal, so we check type directly.
-        // awaitingGotoKey was only set while in normal type mode, so checking
-        // type here just guards against a g-in-normal → i → d sequence.
-        const mode = view.state.field(helixModeField, false);
-        const inNormalType = !mode || mode.type === HelixMode.Normal;
-        if (awaitingGotoKey && inNormalType) {
-          awaitingGotoKey = false;
-          goToDefinitionAtCursorPosition(view);
-          // Reset helix's goto minor mode so the editor doesn't get stuck.
-          // We bypassed helix's goto.d handler (which doesn't exist), so its
-          // own state machine never ran the reset. Do it manually here.
-          view.dispatch({
-            effects: modeEffectType.of({
-              type: HelixMode.Normal,
-              minor: HelixMinor.Normal,
-            }),
-          });
-          return true;
-        }
+        if (!awaitingGotoKey) return false;
         awaitingGotoKey = false;
-        return false; // let helix handle d normally
+        // Only fire in normal-type mode (awaitingGotoKey was set in normal, but
+        // user could have pressed i between g and d)
+        if ((view.state.field(helixModeField, false)?.type ?? 0) !== 0) return false;
+        goToDefinitionAtCursorPosition(view);
+        // Reset goto minor mode — helix won't do it since we consumed d
+        view.dispatch({ effects: modeEffectType.of({ type: 0, minor: 2 }) });
+        return true;
       },
     },
     {
-      // Reset tracker on any key outside the two-char gd sequence
       any(_view, event) {
-        if (event.key !== "g" && event.key !== "d") {
-          awaitingGotoKey = false;
-        }
+        if (event.key !== "g" && event.key !== "d") awaitingGotoKey = false;
         return false;
       },
     },
@@ -332,91 +194,51 @@ function goToDefinitionKeymap(): Extension {
 }
 
 // ---------------------------------------------------------------------------
-// State sync
+// Mode sync (mirrors CodeMirrorVimSync from vim.ts)
 // ---------------------------------------------------------------------------
 
-/**
- * Synchronises helix global state (mode, registers, theme) across all cell editors.
- *
- * Mode is global: pressing `i` in any cell puts every cell into insert mode.
- * This matches the real helix model where mode is a property of the session,
- * not of individual buffers.
- *
- * Register sync is gated on `yankEffect` presence — registers only change on
- * explicit yank/delete/search, not on every keystroke.
- *
- * `yankEffectType` is lazily extracted from the first `globalStateSync` call
- * to avoid a chicken-and-egg dependency at module load time.
- */
-class HelixStateSync {
+class HelixModeSync {
   private instances = new Set<EditorView>();
-  private isBroadcasting = false;
-  private yankEffectType: ReturnType<typeof StateEffect.define> | null = null;
+  isBroadcasting = false;
 
-  public static INSTANCES: HelixStateSync = new HelixStateSync();
-
+  public static INSTANCES = new HelixModeSync();
   private constructor() {}
 
   addInstance(view: EditorView) {
-    // Push the current global mode to the new cell before registering it so
-    // it doesn't briefly flash "normal" while every other cell is in insert.
-    const donor = this.instances.values().next().value as EditorView | undefined;
-    if (donor) {
-      const currentMode = donor.state.field(helixModeField, false);
-      if (currentMode) {
-        view.dispatch({ effects: modeEffectType.of(currentMode) });
-      }
-    }
     this.instances.add(view);
+
+    // Push the current global mode to the new cell so it doesn't start in
+    // Normal while every other cell is in Insert.
+    const donor = [...this.instances].find((v) => v !== view);
+    if (!donor) return;
+    const currentMode = donor.state.field(helixModeField, false);
+    if (currentMode) {
+      view.dispatch({ effects: modeEffectType.of(currentMode) });
+    }
   }
 
   removeInstance(view: EditorView) {
     this.instances.delete(view);
   }
 
-  /**
-   * Broadcast a mode transition from `origin` to all other cells.
-   * Called on every `modeEffect` detected in any cell's update cycle.
-   */
-  syncModeFrom(origin: EditorView, modeValue: { type: number; minor: number }) {
-    if (this.isBroadcasting) return;
-    this.isBroadcasting = true;
-    for (const view of this.instances) {
-      if (view !== origin) {
-        view.dispatch({ effects: modeEffectType.of(modeValue) });
-      }
-    }
+  /** Reset all state — for use in tests only. */
+  reset() {
+    this.instances.clear();
     this.isBroadcasting = false;
   }
 
-  /**
-   * Lazily resolve the `yankEffectType` from the first available editor state.
-   * `globalStateSync` always returns `[{ effects: yankEffect.of({reset:…}) }]`
-   * so `specs[0].effects.type` is the `StateEffectType` we need.
-   */
-  private resolveYankEffectType(state: Parameters<typeof globalStateSync>[0]): void {
-    if (this.yankEffectType) return;
-    const spec = globalStateSync(state)[0] as { effects?: { type: typeof StateEffect.define } };
-    this.yankEffectType = spec?.effects?.type ?? null;
-  }
-
-  hasYankEffect(update: ViewUpdate): boolean {
-    this.resolveYankEffectType(update.state);
-    if (!this.yankEffectType) return false;
-    return update.transactions.some((tr) =>
-      tr.effects.some((e) => e.is(this.yankEffectType!)),
-    );
-  }
-
-  syncFrom(origin: EditorView) {
-    if (this.isBroadcasting) return;
-    this.isBroadcasting = true;
-    const txSpecs = globalStateSync(origin.state);
+  broadcastModeChange(origin: EditorView, mode: HelixModeState) {
     for (const view of this.instances) {
-      if (view !== origin) {
-        view.dispatch(...txSpecs);
+      if (view === origin) continue;
+      try {
+        view.dispatch({ effects: modeEffectType.of(mode) });
+      } catch (e) {
+        Logger.warn("HelixModeSync: failed to broadcast mode change", e);
       }
     }
-    this.isBroadcasting = false;
   }
 }
+
+export const visibleForTesting = {
+  resetHelixModeSync: () => HelixModeSync.INSTANCES.reset(),
+};
